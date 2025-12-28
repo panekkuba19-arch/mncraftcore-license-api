@@ -1,0 +1,17 @@
+{
+  "name": "mncraftcore-license-api",
+  "version": "1.0.0",
+  "description": "System licencji dla MncraftCore",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "pg": "^8.11.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

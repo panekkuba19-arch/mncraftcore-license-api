@@ -6,190 +6,240 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL connection (Render dostarcza DATABASE_URL)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Inicjalizacja tabeli
+// Inicjalizacja tabeli (UPROSZCZONA - bez server_id, owner, expires)
 pool.query(`
   CREATE TABLE IF NOT EXISTS licenses (
     id SERIAL PRIMARY KEY,
     license_key TEXT UNIQUE NOT NULL,
-    server_id TEXT NOT NULL,
-    owner TEXT NOT NULL,
-    expires_at TIMESTAMP NOT NULL,
-    is_active BOOLEAN DEFAULT true,
+    active BOOLEAN DEFAULT true,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )
 `).then(() => {
-  console.log('✅ Baza danych zainicjalizowana');
+  console.log('✅ Tabela licenses gotowa');
 }).catch(err => {
-  console.error('❌ Błąd inicjalizacji bazy:', err);
+  console.error('❌ Błąd tabeli:', err);
 });
 
 // ============================================
-// ROUTES API
+// GŁÓWNE ENDPOINTY
 // ============================================
 
-// GET - Wszystkie licencje
-app.get('/api/licenses', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM licenses ORDER BY created_at DESC');
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET - Sprawdź licencję
-app.get('/api/licenses/:key', async (req, res) => {
-  const { key } = req.params;
-  
-  try {
-    const result = await pool.query('SELECT * FROM licenses WHERE license_key = $1', [key]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Licencja nie istnieje' });
-    }
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST - Weryfikacja licencji (dla FiveM)
-app.post('/api/verify', async (req, res) => {
-  const { license_key, server_id } = req.body;
-
-  if (!license_key || !server_id) {
-    return res.status(400).json({ 
-      valid: false, 
-      error: 'Brak wymaganych danych' 
-    });
-  }
-
-  try {
-    const result = await pool.query(
-      'SELECT * FROM licenses WHERE license_key = $1 AND server_id = $2 AND is_active = true',
-      [license_key, server_id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(403).json({ 
-        valid: false, 
-        error: 'Nieprawidłowa licencja lub Server ID' 
-      });
-    }
-
-    const license = result.rows[0];
-    const now = new Date();
-    const expiresAt = new Date(license.expires_at);
-
-    if (expiresAt < now) {
-      return res.status(403).json({ 
-        valid: false, 
-        error: 'Licencja wygasła' 
-      });
-    }
-
-    res.json({ 
-      valid: true, 
-      owner: license.owner,
-      expires_at: license.expires_at
-    });
-  } catch (err) {
-    res.status(500).json({ valid: false, error: err.message });
-  }
-});
-
-// POST - Dodaj nową licencję
-app.post('/api/licenses', async (req, res) => {
-  const { license_key, server_id, owner, expires_at } = req.body;
-
-  if (!license_key || !server_id || !owner || !expires_at) {
-    return res.status(400).json({ error: 'Brak wymaganych danych' });
-  }
-
-  try {
-    const result = await pool.query(
-      'INSERT INTO licenses (license_key, server_id, owner, expires_at) VALUES ($1, $2, $3, $4) RETURNING *',
-      [license_key, server_id, owner, expires_at]
-    );
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    if (err.code === '23505') { // PostgreSQL unique violation
-      return res.status(409).json({ error: 'Licencja już istnieje' });
-    }
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// PUT - Zmień status licencji (aktywna/nieaktywna)
-app.put('/api/licenses/:key/toggle', async (req, res) => {
-  const { key } = req.params;
-
-  try {
-    const result = await pool.query('SELECT is_active FROM licenses WHERE license_key = $1', [key]);
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Licencja nie istnieje' });
-    }
-
-    const newStatus = !result.rows[0].is_active;
-
-    await pool.query(
-      'UPDATE licenses SET is_active = $1 WHERE license_key = $2',
-      [newStatus, key]
-    );
-
-    res.json({ success: true, is_active: newStatus });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// DELETE - Usuń licencję
-app.delete('/api/licenses/:key', async (req, res) => {
-  const { key } = req.params;
-
-  try {
-    const result = await pool.query('DELETE FROM licenses WHERE license_key = $1', [key]);
-    
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: 'Licencja nie istnieje' });
-    }
-
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Generator klucza licencji
-app.get('/api/generate-key', (req, res) => {
-  const key = crypto.randomBytes(16).toString('hex').toUpperCase();
-  res.json({ license_key: key });
-});
-
-// Health check
+// Root - Info o API
 app.get('/', (req, res) => {
   res.json({ 
     status: 'online',
     service: 'MnCraftCore License API',
+    version: '1.0',
     endpoints: {
-      licenses: '/api/licenses',
+      generate: '/api/generate-key',
       verify: '/api/verify',
-      generate: '/api/generate-key'
+      licenses: '/api/licenses'
     }
   });
 });
 
+// Generuj klucz i ZAPISZ DO BAZY
+app.get('/api/generate-key', async (req, res) => {
+  try {
+    const key = crypto.randomBytes(16).toString('hex').toUpperCase();
+    
+    // ZAPISZ DO BAZY!
+    await pool.query(
+      'INSERT INTO licenses (license_key, active) VALUES ($1, true)',
+      [key]
+    );
+    
+    console.log(`✅ Wygenerowano i zapisano: ${key}`);
+    
+    res.json({ 
+      license_key: key,
+      message: 'Klucz zapisany w bazie danych'
+    });
+    
+  } catch (err) {
+    console.error('❌ Błąd generowania:', err);
+    res.status(500).json({ 
+      error: err.message,
+      hint: 'Sprawdź czy tabela licenses istnieje'
+    });
+  }
+});
+
+// Weryfikuj licencję (dla pluginu Minecraft)
+app.post('/api/verify', async (req, res) => {
+  try {
+    const { license_key } = req.body;
+
+    if (!license_key) {
+      return res.json({ 
+        valid: false, 
+        message: 'Brak klucza licencji' 
+      });
+    }
+
+    console.log(`🔍 Sprawdzam klucz: ${license_key}`);
+
+    const result = await pool.query(
+      'SELECT * FROM licenses WHERE license_key = $1',
+      [license_key]
+    );
+
+    if (result.rows.length === 0) {
+      console.log(`❌ Klucz nie istnieje: ${license_key}`);
+      return res.json({ 
+        valid: false, 
+        message: 'Licencja nie istnieje w systemie' 
+      });
+    }
+
+    const license = result.rows[0];
+
+    if (!license.active) {
+      console.log(`🚫 Klucz nieaktywny: ${license_key}`);
+      return res.json({ 
+        valid: false, 
+        message: 'Licencja została dezaktywowana' 
+      });
+    }
+
+    console.log(`✅ Klucz zweryfikowany: ${license_key}`);
+    
+    res.json({ 
+      valid: true, 
+      message: 'Licencja aktywna',
+      license_key: license.license_key
+    });
+
+  } catch (err) {
+    console.error('❌ Błąd weryfikacji:', err);
+    res.status(500).json({ 
+      valid: false, 
+      message: 'Błąd serwera: ' + err.message 
+    });
+  }
+});
+
+// Lista wszystkich licencji
+app.get('/api/licenses', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT license_key, active, created_at FROM licenses ORDER BY created_at DESC'
+    );
+    
+    console.log(`📋 Zwracam ${result.rows.length} licencji`);
+    res.json(result.rows);
+    
+  } catch (err) {
+    console.error('❌ Błąd listy:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Dezaktywuj licencję (admin)
+app.post('/api/deactivate', async (req, res) => {
+  try {
+    const { license_key } = req.body;
+
+    if (!license_key) {
+      return res.status(400).json({ error: 'Brak klucza licencji' });
+    }
+
+    await pool.query(
+      'UPDATE licenses SET active = false WHERE license_key = $1',
+      [license_key]
+    );
+
+    console.log(`🚫 Dezaktywowano: ${license_key}`);
+    res.json({ message: 'Licencja dezaktywowana' });
+
+  } catch (err) {
+    console.error('❌ Błąd:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reaktywuj licencję (admin)
+app.post('/api/activate', async (req, res) => {
+  try {
+    const { license_key } = req.body;
+
+    if (!license_key) {
+      return res.status(400).json({ error: 'Brak klucza licencji' });
+    }
+
+    await pool.query(
+      'UPDATE licenses SET active = true WHERE license_key = $1',
+      [license_key]
+    );
+
+    console.log(`✅ Reaktywowano: ${license_key}`);
+    res.json({ message: 'Licencja reaktywowana' });
+
+  } catch (err) {
+    console.error('❌ Błąd:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Usuń licencję (admin)
+app.delete('/api/licenses/:key', async (req, res) => {
+  try {
+    const { key } = req.params;
+
+    const result = await pool.query(
+      'DELETE FROM licenses WHERE license_key = $1',
+      [key]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Licencja nie istnieje' });
+    }
+
+    console.log(`🗑️ Usunięto: ${key}`);
+    res.json({ message: 'Licencja usunięta' });
+
+  } catch (err) {
+    console.error('❌ Błąd:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Health check
+app.get('/health', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    res.json({ 
+      status: 'healthy', 
+      database: 'connected',
+      time: result.rows[0].now
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      status: 'unhealthy', 
+      error: err.message 
+    });
+  }
+});
+
 // Start serwera
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 API uruchomione na porcie ${PORT}`);
+  console.log(`📍 Endpointy:`);
+  console.log(`   GET  /api/generate-key - Generuj i zapisz klucz`);
+  console.log(`   POST /api/verify - Weryfikuj licencję`);
+  console.log(`   GET  /api/licenses - Lista licencji`);
+});
+
+process.on('SIGTERM', () => {
+  console.log('⏹️ Zamykanie serwera...');
+  pool.end();
+  process.exit(0);
 });
